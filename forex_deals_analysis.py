@@ -307,7 +307,25 @@ def call_chat_openai_api(results, api_key, model="gpt-3.5-turbo"):
             messages = [
                 {
                     "role": "system",
-                    "content": "You are a financial analyst assistant. Analyze the following forex deals analysis results and provide insights."
+                    "content": """
+                    You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV). Focus on identifying whether the movement was primarily due to:
+
+                    Introduction of new deals
+                    Fluctuations in spot exchange rates
+                    Changes in forward rates
+                    Important Instruction:
+                    Do not include currencies in the summary if their spot or forward rates remained stable between the two dates.
+
+                    Use the following examples as guidance for the style and depth of analysis expected:
+
+                    Example 1 - BaseMV Dip Due to New Deals:
+                    On March 7, the user's BaseMV declined by $500M. Analysis revealed that 45 new deals were added, contributing a net negative BaseMV of $620M. Spot and forward rates remained relatively stable, indicating that the dip was primarily driven by the new deal activity.
+
+                    Example 2 - BaseMV Rise Due to Rate Fluctuations:
+                    Between March 6 and March 7, the BaseMV increased by $800M. Although 53 new deals were added with a net negative impact of $560M, favorable movements in EUR and AUD forward rates, along with a rise in JPY spot rates, contributed positively to the portfolio valuation.
+
+                    Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.
+                    """
                 },
                 {
                     "role": "user",
