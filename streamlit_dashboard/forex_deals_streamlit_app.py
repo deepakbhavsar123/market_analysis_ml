@@ -105,9 +105,7 @@ def analyze_forex_data(data):
         'total_new_deals': len(new_deals),
         'total_new_records': len(new_deals_data),
         'basemv_sum': float(new_deals_basemv_sum),
-        'new_deal_ids': list(new_deals),
-        'top_3_deals_by_basemv': top_3_deals,
-        'all_deal_contributions': deal_basemv_contributions
+        'top_3_deals_by_basemv': top_3_deals
     }
     
     # === EXISTING DEALS ANALYSIS ===
@@ -136,8 +134,7 @@ def analyze_forex_data(data):
     results['existing_deals_analysis'] = {
         'total_existing_deals': len(existing_deals),
         'total_basemv_change': float(total_existing_basemv_change),
-        'top_3_deals_by_basemv_change': top_3_existing_deals,
-        'all_deal_changes': existing_deal_changes
+        'top_3_deals_by_basemv_change': top_3_existing_deals
     }
     
     # === RATE STATISTICS ANALYSIS ===
@@ -683,18 +680,6 @@ def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api
     """
     print("Calling OpenAI API with model:", model)
     
-    # Build user context string
-    context_info = ""
-    if user_context:
-        context_parts = []
-        if user_context.get('entity') and user_context['entity'] != 'All':
-            context_parts.append(f"Entity: {user_context['entity']}")
-        if user_context.get('counterparty') and user_context['counterparty'] != 'All':
-            context_parts.append(f"Counterparty: {user_context['counterparty']}")
-        
-        if context_parts:
-            context_info = f"\n\nThis analysis is filtered for specific users: {' | '.join(context_parts)}. Please include this context in your summary."
-    
     # Prepare the chat message payload
     messages = [
         {
@@ -716,7 +701,7 @@ def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api
             Example 2 - BaseMV Rise Due to Rate Fluctuations:
             Between March 6 and March 7, the BaseMV increased by $800M. Although 53 new deals were added with a net negative impact of $560M, favorable movements in EUR and AUD forward rates, along with a rise in JPY spot rates, contributed positively to the portfolio valuation.
 
-            Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.{context_info}
+            Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.
             """
         },
         {
@@ -737,7 +722,7 @@ def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api
             "temperature": 0.7
         }
         headers = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": api_key,
             "Content-Type": "application/json",
             "Cache-Control": "no-cache"
         }
@@ -968,6 +953,35 @@ def main():
         else:
             st.markdown(f"**Total Records:** {len(filtered_data):,}")
             st.markdown("**Filter:** None (All Users)")
+        
+        st.markdown("---")
+        st.markdown("### 💾 Saved Analysis Files")
+        
+        # Check for existing analysis files
+        results_dir = "../analysis_results"
+        if os.path.exists(results_dir):
+            json_files = [f for f in os.listdir(results_dir) if f.endswith('.json')]
+            if json_files:
+                # Show recent files (last 5)
+                recent_files = sorted(json_files)[-5:]
+                st.markdown("**Recent Analysis Files:**")
+                for file in reversed(recent_files):
+                    # Extract timestamp from filename
+                    try:
+                        parts = file.split('_')
+                        if len(parts) >= 3:
+                            date_part = parts[-2]
+                            time_part = parts[-1].replace('.json', '')
+                            formatted_time = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {time_part[:2]}:{time_part[2:4]}"
+                            st.text(f"• {formatted_time}")
+                        else:
+                            st.text(f"• {file}")
+                    except:
+                        st.text(f"• {file}")
+            else:
+                st.markdown("*No saved files yet*")
+        else:
+            st.markdown("*No saved files yet*")
     
     st.sidebar.markdown("---")
     
@@ -1114,18 +1128,14 @@ def main():
             'total_new_deals': len(new_deals),
             'total_new_records': len(new_deals_data),
             'basemv_sum': float(new_deals_basemv_sum),
-            'new_deal_ids': list(new_deals),
-            'top_3_deals_by_basemv': top_3_deals,
-            'all_deal_contributions': deal_basemv_contributions
+            'top_3_deals_by_basemv': top_3_deals
         }
         
         results['matured_deals_analysis'] = {
             'total_matured_deals': len(matured_deals),
             'total_matured_records': len(matured_deals_data),
             'basemv_sum': float(matured_deals_basemv_sum),
-            'matured_deal_ids': list(matured_deals),
-            'top_3_deals_by_basemv': top_3_matured_deals,
-            'all_deal_contributions': matured_deal_contributions
+            'top_3_deals_by_basemv': top_3_matured_deals
         }
 
         # === EXISTING DEALS ANALYSIS ===
@@ -1150,8 +1160,7 @@ def main():
         results['existing_deals_analysis'] = {
             'total_existing_deals': len(existing_deals),
             'total_basemv_change': float(total_existing_basemv_change),
-            'top_3_deals_by_basemv_change': top_3_existing_deals,
-            'all_deal_changes': existing_deal_changes
+            'top_3_deals_by_basemv_change': top_3_existing_deals
         }
 
         # === RATE STATISTICS ANALYSIS ===
@@ -1381,32 +1390,52 @@ def main():
             with st.spinner("🧠 Analyzing data and generating business insights..."):
                 try:
                     st.info("📊 Calling OpenAI API function...")
-                    # Prepare user context for API
-                    user_context = {}
-                    if user_type == "Entity":
-                        user_context['entity'] = selected_entity
-                    elif user_type == "Counterparty":
-                        user_context['counterparty'] = selected_counterparty
                     
-                    summary = call_chat_openai_api(results, api_key, user_context)
-                    st.info(f"📝 Received response length: {len(summary)} characters")
+                    # Create directory for storing JSON results
+                    results_dir = "../analysis_results"
+                    os.makedirs(results_dir, exist_ok=True)
+                    
+                    # Create filename with timestamp and user context
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    user_suffix = ""
+                    if user_type != "All Users":
+                        user_suffix = f"_{user_type.lower()}_{selected_user}"
+                    
+                    json_filename = f"forex_analysis_results{user_suffix}_{timestamp}.json"
+                    json_filepath = os.path.join(results_dir, json_filename)
+                    
+                    # Store the complete analysis results as JSON
+                    analysis_data = {
+                        'metadata': {
+                            'analysis_dates': {
+                                'date1': date1.isoformat(),
+                                'date2': date2.isoformat()
+                            }
+                        },
+                        'analysis_results': results
+                    }
+                    
+                    # Save JSON to file
+                    with open(json_filepath, 'w', encoding='utf-8') as f:
+                        json.dump(analysis_data, f, indent=2, cls=NumpyEncoder, ensure_ascii=False)
+                    
+                    summary = call_chat_openai_api(results, api_key)
+                    
+                    # Update the JSON file with the LLM summary
+                    analysis_data['llm_summary'] = {
+                        'generated_at': datetime.now().isoformat(),
+                        'model_used': "gpt-4",  # or get from function parameters
+                        'summary_text': summary,
+                        'summary_length': len(summary)
+                    }
+                    
+                    # Re-save the updated JSON with summary
+                    with open(json_filepath, 'w', encoding='utf-8') as f:
+                        json.dump(analysis_data, f, indent=2, cls=NumpyEncoder, ensure_ascii=False)
                     
                     # Display the summary in an attractive format
                     st.success("✅ Business insights generated successfully!")
                     
-                    # Create an attractive summary box
-                    st.markdown("""
-                    <div style="
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        padding: 20px;
-                        border-radius: 10px;
-                        color: white;
-                        margin: 10px 0;
-                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-                    ">
-                        <h3 style="color: white; margin-bottom: 15px;">📊 Executive Summary</h3>
-                    </div>
-                    """, unsafe_allow_html=True)
                     
                     # Display the summary text in a nice info box
                     st.info(f"💡 **AI Analysis:** {summary}")
@@ -1443,67 +1472,65 @@ def main():
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("📄 Download Analysis Results (JSON)"):
-            # Create user-specific filename
-            user_suffix = ""
-            if user_type != "All Users":
-                user_suffix = f"_{user_type.lower()}_{selected_user}"
-            
-            json_str = json.dumps(results, indent=2, default=str)
-            st.download_button(
-                label="Download JSON",
-                data=json_str,
-                file_name=f"forex_analysis{user_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
+        # Create user-specific filename
+        user_suffix = ""
+        if user_type != "All Users":
+            user_suffix = f"_{user_type.lower()}_{selected_user}"
+        
+        json_str = json.dumps(results, indent=2, default=str)
+        st.download_button(
+            label="📄 Download Analysis Results (JSON)",
+            data=json_str,
+            file_name=f"forex_analysis_{user_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
+        )
     
     with col2:
-        if st.button("📊 Download Summary Report"):
-            # Create summary report
-            summary_lines = [
-                "FOREX DEALS ANALYSIS SUMMARY",
-                "=" * 50,
-                f"Analysis Period: {results['target_dates']['date1']} to {results['target_dates']['date2']}",
-                "",
-                "KEY METRICS:",
-                f"• Total BaseMV Change: ${results['summary']['basemv_totals']['difference']:,.2f}",
-                f"• New Deals Count: {results['summary']['new_deals_count']}",
-                f"• New Deals BaseMV Sum: ${results['summary']['new_deals_basemv_sum']:,.2f}",
-                f"• Existing Deals Count: {results['summary']['existing_deals_count']}",
-                f"• Existing Deals BaseMV Change: ${results['summary']['existing_deals_basemv_change']:,.2f}",
-                f"• Matured Deals Count: {results['summary']['matured_deals_count']}",
-                f"• Matured Deals BaseMV Sum: ${results['summary']['matured_deals_basemv_sum']:,.2f}",
-                "",
-                "TOP NEW DEALS:",
-            ]
-            
-            for i, deal in enumerate(results['new_deals_analysis']['top_3_deals_by_basemv'], 1):
-                summary_lines.append(f"{i}. Deal {deal['deal_id']}: ${deal['basemv_contribution']:,.2f}")
-            
-            summary_lines.extend([
-                "",
-                "TOP EXISTING DEALS CHANGES:",
-            ])
-            
-            for i, deal in enumerate(results['existing_deals_analysis']['top_3_deals_by_basemv_change'], 1):
-                summary_lines.append(f"{i}. Deal {deal['deal_id']}: ${deal['basemv_change']:,.2f}")
-            
-            summary_lines.extend([
-                "",
-                "TOP MATURED DEALS:",
-            ])
-            
-            for i, deal in enumerate(results['matured_deals_analysis']['top_3_deals_by_basemv'], 1):
-                summary_lines.append(f"{i}. Deal {deal['deal_id']}: ${deal['basemv_contribution']:,.2f}")
-            
-            summary_text = "\n".join(summary_lines)
-            
-            st.download_button(
-                label="Download Summary",
-                data=summary_text,
-                file_name=f"forex_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                mime="text/plain"
-            )
+        # Create summary report
+        summary_lines = [
+            "FOREX DEALS ANALYSIS SUMMARY",
+            "=" * 50,
+            f"Analysis Period: {results['target_dates']['date1']} to {results['target_dates']['date2']}",
+            "",
+            "KEY METRICS:",
+            f"• Total BaseMV Change: ${results['summary']['basemv_totals']['difference']:,.2f}",
+            f"• New Deals Count: {results['summary']['new_deals_count']}",
+            f"• New Deals BaseMV Sum: ${results['summary']['new_deals_basemv_sum']:,.2f}",
+            f"• Existing Deals Count: {results['summary']['existing_deals_count']}",
+            f"• Existing Deals BaseMV Change: ${results['summary']['existing_deals_basemv_change']:,.2f}",
+            f"• Matured Deals Count: {results['summary']['matured_deals_count']}",
+            f"• Matured Deals BaseMV Sum: ${results['summary']['matured_deals_basemv_sum']:,.2f}",
+            "",
+            "TOP NEW DEALS:",
+        ]
+        
+        for i, deal in enumerate(results['new_deals_analysis']['top_3_deals_by_basemv'], 1):
+            summary_lines.append(f"{i}. Deal {deal['deal_id']}: ${deal['basemv_contribution']:,.2f}")
+        
+        summary_lines.extend([
+            "",
+            "TOP EXISTING DEALS CHANGES:",
+        ])
+        
+        for i, deal in enumerate(results['existing_deals_analysis']['top_3_deals_by_basemv_change'], 1):
+            summary_lines.append(f"{i}. Deal {deal['deal_id']}: ${deal['basemv_change']:,.2f}")
+        
+        summary_lines.extend([
+            "",
+            "TOP MATURED DEALS:",
+        ])
+        
+        for i, deal in enumerate(results['matured_deals_analysis']['top_3_deals_by_basemv'], 1):
+            summary_lines.append(f"{i}. Deal {deal['deal_id']}: ${deal['basemv_contribution']:,.2f}")
+        
+        summary_text = "\n".join(summary_lines)
+        
+        st.download_button(
+            label="📊 Download Summary Report",
+            data=summary_text,
+            file_name=f"forex_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain"
+        )
 
 # =============================================================================
 # MAIN APPLICATION
