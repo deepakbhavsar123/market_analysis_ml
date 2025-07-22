@@ -6,6 +6,8 @@ Analyzes forex deals data to extract new deals and rate statistics for March 6-7
 import streamlit as st
 import pandas as pd
 import json
+import numpy as np
+import traceback
 from datetime import datetime
 import requests
 import plotly.express as px
@@ -27,7 +29,6 @@ st.set_page_config(
 @st.cache_data
 def load_forex_data():
     """Load and cache the forex data"""
-    import os
     # Try different possible paths for the data file
     possible_paths = [
         '../data/Cashflows_FX_V3.csv',
@@ -222,6 +223,10 @@ def analyze_forex_data(data):
     
     return results, data_date1, data_date2, data
 
+# =============================================================================
+# CHART CREATION FUNCTIONS
+# =============================================================================
+
 def create_basemv_comparison_chart(results, date1_str=None, date2_str=None):
     """Create BaseMV comparison chart with dynamic date labels"""
     basemv_data = results['summary']['basemv_totals']
@@ -403,17 +408,298 @@ def create_rate_statistics_chart(results, rate_type='forward'):
     
     return fig
 
-def call_chat_openai_api(results, api_key, model="gpt-4", api_version="2023-05-15"):
+def create_unified_currency_minmax_chart(data_date1, data_date2, currency, date1, date2, rate_type='forward'):
+    """Create unified min/max rate chart for selected currency (forward or spot)"""
+    if rate_type == 'forward':
+        valuation_models = ['FORWARD', 'FORWARD NPV']
+        rate_column = 'FwdRate'
+        rate_name = 'Forward Rate'
+        min_color = 'lightcoral'
+        max_color = 'lightblue'
+        mean_color = 'darkgreen'
+    else:
+        valuation_models = ['NPV SPOT']
+        rate_column = 'SpotRate'
+        rate_name = 'Spot Rate'
+        min_color = 'salmon'
+        max_color = 'skyblue'
+        mean_color = 'darkorange'
+    
+    # Filter for the appropriate deals
+    data_date1_filtered = data_date1[data_date1['ValuationModel'].isin(valuation_models)]
+    data_date2_filtered = data_date2[data_date2['ValuationModel'].isin(valuation_models)]
+    
+    currency_date1 = data_date1_filtered[data_date1_filtered['Currency'] == currency]
+    currency_date2 = data_date2_filtered[data_date2_filtered['Currency'] == currency]
+    
+    fig = go.Figure()
+    
+    if not currency_date1.empty and not currency_date2.empty:
+        # Calculate min, max, and mean rates for each date
+        rates_date1 = currency_date1[rate_column].dropna()
+        rates_date2 = currency_date2[rate_column].dropna()
+        
+        if len(rates_date1) > 0 and len(rates_date2) > 0:
+            date1_min = rates_date1.min()
+            date1_max = rates_date1.max()
+            date1_mean = rates_date1.mean()
+            date2_min = rates_date2.min()
+            date2_max = rates_date2.max()
+            date2_mean = rates_date2.mean()
+            
+            # Add min line
+            fig.add_trace(go.Scatter(
+                x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
+                y=[date1_min, date2_min],
+                mode='lines+markers',
+                name=f'Minimum {rate_name}',
+                line=dict(color=min_color, width=3, dash='dash'),
+                marker=dict(size=8, color=min_color),
+                hovertemplate=f'<b>%{{x}}</b><br>Min Rate: %{{y:.6f}}<extra></extra>'
+            ))
+            
+            # Add max line
+            fig.add_trace(go.Scatter(
+                x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
+                y=[date1_max, date2_max],
+                mode='lines+markers',
+                name=f'Maximum {rate_name}',
+                line=dict(color=max_color, width=3, dash='dash'),
+                marker=dict(size=8, color=max_color),
+                hovertemplate=f'<b>%{{x}}</b><br>Max Rate: %{{y:.6f}}<extra></extra>'
+            ))
+            
+            # Add mean line
+            fig.add_trace(go.Scatter(
+                x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
+                y=[date1_mean, date2_mean],
+                mode='lines+markers',
+                name=f'Mean {rate_name}',
+                line=dict(color=mean_color, width=4),
+                marker=dict(size=10, color=mean_color),
+                hovertemplate=f'<b>%{{x}}</b><br>Mean Rate: %{{y:.6f}}<extra></extra>'
+            ))
+            
+            fig.update_layout(
+                title=f"{currency} - {rate_name} Trends (Min/Max/Mean)",
+                xaxis_title="Date",
+                yaxis_title=rate_name,
+                template="plotly_white",
+                height=400,
+                hovermode='x unified',
+                showlegend=True,
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=0.01
+                )
+            )
+        else:
+            fig.add_annotation(
+                text=f"No {rate_name.lower()} data available for {currency} on selected dates",
+                showarrow=False,
+                x=0.5,
+                y=0.5,
+                xref="paper",
+                yref="paper"
+            )
+            fig.update_layout(
+                title=f"{currency} - Min/Max {rate_name} Comparison",
+                template="plotly_white",
+                height=400
+            )
+    else:
+        fig.add_annotation(
+            text=f"No {rate_name.lower()} deals available for {currency} on selected dates",
+            showarrow=False,
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper"
+        )
+        fig.update_layout(
+            title=f"{currency} - Min/Max {rate_name} Comparison",
+            template="plotly_white",
+            height=400
+        )
+    
+    return fig
+
+# =============================================================================
+# DATA PROCESSING FUNCTIONS
+# =============================================================================
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+    
+# =============================================================================
+# UI HELPER FUNCTIONS
+# =============================================================================
+
+def display_currency_rate_statistics(data_date1, data_date2, selected_currency, date1, date2, rate_type='forward'):
+    """Display currency rate statistics in a consistent format"""
+    if rate_type == 'forward':
+        valuation_models = ['FORWARD', 'FORWARD NPV']
+        rate_column = 'FwdRate'
+        rate_name = 'Forward'
+    else:
+        valuation_models = ['NPV SPOT']
+        rate_column = 'SpotRate'
+        rate_name = 'Spot'
+    
+    # Filter data
+    data_date1_filtered = data_date1[data_date1['ValuationModel'].isin(valuation_models)]
+    data_date2_filtered = data_date2[data_date2['ValuationModel'].isin(valuation_models)]
+    currency_date1 = data_date1_filtered[data_date1_filtered['Currency'] == selected_currency]
+    currency_date2 = data_date2_filtered[data_date2_filtered['Currency'] == selected_currency]
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if not currency_date1.empty:
+            st.metric(
+                f"{selected_currency} {rate_name} Records ({date1.strftime('%b %d')})",
+                len(currency_date1)
+            )
+        else:
+            st.metric(f"{selected_currency} {rate_name} Records ({date1.strftime('%b %d')})", 0)
+    
+    with col2:
+        if not currency_date2.empty:
+            st.metric(
+                f"{selected_currency} {rate_name} Records ({date2.strftime('%b %d')})",
+                len(currency_date2)
+            )
+        else:
+            st.metric(f"{selected_currency} {rate_name} Records ({date2.strftime('%b %d')})", 0)
+    
+    with col3:
+        if not currency_date1.empty:
+            rates_date1 = currency_date1[rate_column].dropna()
+            if len(rates_date1) > 0:
+                mean_rate_date1 = rates_date1.mean()
+                st.metric(
+                    f"Mean {rate_name} Rate ({date1.strftime('%b %d')})",
+                    f"{mean_rate_date1:.6f}"
+                )
+            else:
+                st.metric(f"Mean {rate_name} Rate ({date1.strftime('%b %d')})", "N/A")
+        else:
+            st.metric(f"Mean {rate_name} Rate ({date1.strftime('%b %d')})", "N/A")
+    
+    with col4:
+        if not currency_date2.empty:
+            rates_date2 = currency_date2[rate_column].dropna()
+            if len(rates_date2) > 0:
+                mean_rate_date2 = rates_date2.mean()
+                st.metric(
+                    f"Mean {rate_name} Rate ({date2.strftime('%b %d')})",
+                    f"{mean_rate_date2:.6f}"
+                )
+            else:
+                st.metric(f"Mean {rate_name} Rate ({date2.strftime('%b %d')})", "N/A")
+        else:
+            st.metric(f"Mean {rate_name} Rate ({date2.strftime('%b %d')})", "N/A")
+
+def display_analysis_summary_metrics(results, date1, date2):
+    """Display deal counts and changes in a consistent format"""
+    col_metrics1, col_metrics2, col_metrics3 = st.columns(3)
+    
+    with col_metrics1:
+        st.metric(
+            f"Total Deals ({date1.strftime('%b %d')})",
+            results['summary']['total_unique_deals_date1']
+        )
+    
+    with col_metrics2:
+        st.metric(
+            f"Total Deals ({date2.strftime('%b %d')})",
+            results['summary']['total_unique_deals_date2']
+        )
+    
+    with col_metrics3:
+        deals_change = results['summary']['total_unique_deals_date2'] - results['summary']['total_unique_deals_date1']
+        st.metric(
+            "Deal Count Change",
+            deals_change
+        )
+
+def display_key_financial_metrics(results, date1, date2):
+    """Display key financial metrics in a consistent format"""
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            f"📊 BaseMV ({date1.strftime('%b %d')})",
+            f"${results['summary']['basemv_totals']['date1_total']:,.0f}"
+        )
+    
+    with col2:
+        st.metric(
+            f"📊 BaseMV ({date2.strftime('%b %d')})",
+            f"${results['summary']['basemv_totals']['date2_total']:,.0f}"
+        )
+    
+    with col3:
+        st.metric(
+            f"📊 BaseMV Change",
+            f"${results['summary']['basemv_totals']['difference']:,.0f}"
+        )
+    
+    # Second row: Deal impacts
+    col4, col5, col6 = st.columns(3)
+    
+    with col4:
+        st.metric(
+            "🆕 New Deals Impact",
+            f"${results['summary']['new_deals_basemv_sum']:,.0f}"
+        )
+    
+    with col5:
+        st.metric(
+            "🔄 Existing Deals Change",
+            f"${results['summary']['existing_deals_basemv_change']:,.0f}"
+        )
+    
+    with col6:
+        st.metric(
+            "📤 Matured Deals Impact",
+            f"${results['summary']['matured_deals_basemv_sum']:,.0f}"
+        )
+
+# =============================================================================
+# API INTEGRATION FUNCTIONS
+# =============================================================================
+
+def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api_version="2023-05-15"):
     """
     Call the OpenAI Chat API with the analysis results as context.
     """
     print("Calling OpenAI API with model:", model)
     
+    # Build user context string
+    context_info = ""
+    if user_context:
+        context_parts = []
+        if user_context.get('entity') and user_context['entity'] != 'All':
+            context_parts.append(f"Entity: {user_context['entity']}")
+        if user_context.get('counterparty') and user_context['counterparty'] != 'All':
+            context_parts.append(f"Counterparty: {user_context['counterparty']}")
+        
+        if context_parts:
+            context_info = f"\n\nThis analysis is filtered for specific users: {' | '.join(context_parts)}. Please include this context in your summary."
+    
     # Prepare the chat message payload
     messages = [
         {
             "role": "system",
-            "content": """
+            "content": f"""
             You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV). Focus on identifying whether the movement was primarily due to:
 
             Introduction of new deals
@@ -430,12 +716,12 @@ def call_chat_openai_api(results, api_key, model="gpt-4", api_version="2023-05-1
             Example 2 - BaseMV Rise Due to Rate Fluctuations:
             Between March 6 and March 7, the BaseMV increased by $800M. Although 53 new deals were added with a net negative impact of $560M, favorable movements in EUR and AUD forward rates, along with a rise in JPY spot rates, contributed positively to the portfolio valuation.
 
-            Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.
+            Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.{context_info}
             """
         },
         {
             "role": "user",
-            "content": f"Here are the JSON analysis results:\n{json.dumps(results, indent=2)}"
+            "content": f"Here are the JSON analysis results:\n{json.dumps(results, indent=2, cls=NumpyEncoder)}\n\n"
         }
     ]
 
@@ -582,14 +868,9 @@ def create_daily_basemv_line_chart(daily_basemv_data, selected_date1=None, selec
 def main():
     """Main Streamlit application"""
     
-    # Header
-    st.title("🚀 FX Deals Analysis Dashboard")
-    st.markdown("---")
-    
-    # Sidebar
-    st.sidebar.title("📊 FX Market Summary  ")
-    
-    st.sidebar.markdown("---")
+    # =============================================================================
+    # DATA LOADING AND PROCESSING
+    # =============================================================================
     
     # Load data
     with st.spinner("Loading forex data..."):
@@ -598,11 +879,107 @@ def main():
     if data is None:
         st.stop()
     
+    # =============================================================================
+    # USER FILTERING (MOVED TO SIDEBAR)
+    # =============================================================================
+    # Get unique entities and counterparties
+    available_entities = sorted(list(data['Entity'].dropna().unique()))
+    available_counterparties = sorted(list(data['Counterparty'].dropna().unique()))
+    
+    # Create single user selection interface in sidebar
+    with st.sidebar:
+        st.markdown("### 👥 User Selection")
+        st.markdown("Select ONE user for analysis:")
+        
+        user_type = st.radio(
+            "Select user type:",
+            options=["All Users", "Entity", "Counterparty"],
+            index=0,
+            help="Choose to analyze all users, or filter by a specific Entity or Counterparty"
+        )
+        
+        selected_entity = 'All'
+        selected_counterparty = 'All'
+        selected_user = None
+        
+        if user_type == "Entity":
+            selected_user = st.selectbox(
+                "Select Entity:",
+                options=available_entities,
+                help="Choose specific entity for analysis"
+            )
+            selected_entity = selected_user
+        elif user_type == "Counterparty":
+            selected_user = st.selectbox(
+                "Select Counterparty:",
+                options=available_counterparties,
+                help="Choose specific counterparty for analysis"
+            )
+            selected_counterparty = selected_user
+    
+    # Filter data based on selection
+    filtered_data = data.copy()
+    
+    if user_type == "Entity":
+        filtered_data = filtered_data[filtered_data['Entity'] == selected_entity]
+    elif user_type == "Counterparty":
+        filtered_data = filtered_data[filtered_data['Counterparty'] == selected_counterparty]
+    
+    # Display filtering information in main area (compact)
+    if user_type != "All Users":
+        st.success(f"🔍 **Filtered Analysis:** {user_type}: {selected_user} | **Records:** {len(filtered_data):,} (from {len(data):,} total)")
+    else:
+        st.info("📊 **Analyzing all users** (no filters applied)")
+    
+    # Check if filtered data is empty
+    if len(filtered_data) == 0:
+        st.error(f"❌ No data available for the selected {user_type}: {selected_user}. Please choose a different user.")
+        st.stop()
+    
+    # =============================================================================
+    # HEADER AND INITIAL SETUP
+    # =============================================================================
+    
+    # Header
+    st.title("🚀 FX Deals Analysis Dashboard")
+    
+    # Display current user context if filtered
+    if user_type != "All Users":
+        st.caption(f"🎯 Filtered for: {user_type}: {selected_user}")
+    
+    st.markdown("---")
+    
+    # Sidebar
+    
+    # Display current filters in sidebar (updated after user selection)
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 📈 Data Overview")
+        
+        if user_type != "All Users":
+            st.markdown(f"**Current Filter:** {user_type}")
+            st.markdown(f"**Selected:** {selected_user}")
+            st.markdown(f"**Filtered Records:** {len(filtered_data):,}")
+            st.markdown(f"**Total Records:** {len(data):,}")
+            
+            # Calculate filter percentage
+            filter_percentage = (len(filtered_data) / len(data)) * 100
+            st.markdown(f"**Coverage:** {filter_percentage:.1f}%")
+        else:
+            st.markdown(f"**Total Records:** {len(filtered_data):,}")
+            st.markdown("**Filter:** None (All Users)")
+    
+    st.sidebar.markdown("---")
+    
+    # st.markdown("---")
+    
     # Perform analysis
     with st.spinner("Performing analysis..."):
-        results, data_date1, data_date2, full_data = analyze_forex_data(data)
+        results, data_date1, data_date2, full_data = analyze_forex_data(filtered_data)
     
-    # Daily BaseMV trend line chart
+    # =============================================================================
+    # BASEMV TIMELINE VISUALIZATION
+    # =============================================================================
     st.subheader("📈 Daily BaseMV Trend Over Time")
     daily_basemv_detailed = calculate_daily_basemv_sum(full_data)
     
@@ -611,7 +988,7 @@ def main():
         st.session_state.chart_placeholder = st.empty()
     
     # Show the initial chart
-    st.session_state.chart_placeholder.plotly_chart(create_daily_basemv_line_chart(daily_basemv_detailed), use_container_width=True)
+    st.session_state.chart_placeholder.plotly_chart(create_daily_basemv_line_chart(daily_basemv_detailed), use_container_width=True, key="daily_basemv_initial")
     
     # Display daily statistics table in expandable section
     with st.expander("📋 View Daily BaseMV Data Table"):
@@ -664,386 +1041,14 @@ def main():
     # Update the chart to highlight selected dates
     st.session_state.chart_placeholder.plotly_chart(
         create_daily_basemv_line_chart(daily_basemv_detailed, selected_date1, selected_date2), 
-        use_container_width=True
+        use_container_width=True,
+        key="daily_basemv_updated"
     )
 
     # Filter data for selected dates
     date1, date2 = sorted([selected_date1, selected_date2])
     data_date1 = full_data[full_data['PositionDate'].dt.date == date1]
     data_date2 = full_data[full_data['PositionDate'].dt.date == date2]
-
-    # Currency Min/Max Analysis Section
-    st.markdown("---")
-    st.subheader("💱 Currency Forward Rate Min/Max Analysis")
-    
-    # Get available currencies from selected dates with forward valuation
-    forward_valuation_models = ['FORWARD', 'FORWARD NPV']
-    forward_data_date1 = data_date1[data_date1['ValuationModel'].isin(forward_valuation_models)]
-    forward_data_date2 = data_date2[data_date2['ValuationModel'].isin(forward_valuation_models)]
-    available_currencies = sorted(list(set(forward_data_date1['Currency'].unique()) | set(forward_data_date2['Currency'].unique())))
-    
-    if available_currencies:
-        selected_currency = st.selectbox(
-            "Select Currency for Forward Rate Min/Max Analysis:",
-            options=available_currencies,
-            index=0,
-            help="Select a currency to view min/max forward rate analysis for the selected dates"
-        )
-        
-        # Create min/max analysis chart for selected currency
-        def create_currency_minmax_chart(data_date1, data_date2, currency, date1, date2):
-            """Create min/max forward rate chart for selected currency"""
-            forward_valuation_models = ['FORWARD', 'FORWARD NPV']
-            
-            # Filter for forward deals only
-            forward_data_date1 = data_date1[data_date1['ValuationModel'].isin(forward_valuation_models)]
-            forward_data_date2 = data_date2[data_date2['ValuationModel'].isin(forward_valuation_models)]
-            
-            currency_date1 = forward_data_date1[forward_data_date1['Currency'] == currency]
-            currency_date2 = forward_data_date2[forward_data_date2['Currency'] == currency]
-            
-            fig = go.Figure()
-            
-            if not currency_date1.empty and not currency_date2.empty:
-                # Calculate min and max forward rates for each date
-                fwd_rates_date1 = currency_date1['FwdRate'].dropna()
-                fwd_rates_date2 = currency_date2['FwdRate'].dropna()
-                
-                if len(fwd_rates_date1) > 0 and len(fwd_rates_date2) > 0:
-                    date1_min = fwd_rates_date1.min()
-                    date1_max = fwd_rates_date1.max()
-                    date1_mean = fwd_rates_date1.mean()
-                    date2_min = fwd_rates_date2.min()
-                    date2_max = fwd_rates_date2.max()
-                    date2_mean = fwd_rates_date2.mean()
-                    
-                    # Add min line
-                    fig.add_trace(go.Scatter(
-                        x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
-                        y=[date1_min, date2_min],
-                        mode='lines+markers',
-                        name='Minimum Forward Rate',
-                        line=dict(color='lightcoral', width=3, dash='dash'),
-                        marker=dict(size=8, color='lightcoral'),
-                        hovertemplate='<b>%{x}</b><br>Min Rate: %{y:.6f}<extra></extra>'
-                    ))
-                    
-                    # Add max line
-                    fig.add_trace(go.Scatter(
-                        x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
-                        y=[date1_max, date2_max],
-                        mode='lines+markers',
-                        name='Maximum Forward Rate',
-                        line=dict(color='lightblue', width=3, dash='dash'),
-                        marker=dict(size=8, color='lightblue'),
-                        hovertemplate='<b>%{x}</b><br>Max Rate: %{y:.6f}<extra></extra>'
-                    ))
-                    
-                    # Add mean line
-                    fig.add_trace(go.Scatter(
-                        x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
-                        y=[date1_mean, date2_mean],
-                        mode='lines+markers',
-                        name='Mean Forward Rate',
-                        line=dict(color='darkgreen', width=4),
-                        marker=dict(size=10, color='darkgreen'),
-                        hovertemplate='<b>%{x}</b><br>Mean Rate: %{y:.6f}<extra></extra>'
-                    ))
-                    
-                    fig.update_layout(
-                        title=f"{currency} - Forward Rate Trends (Min/Max/Mean)",
-                        xaxis_title="Date",
-                        yaxis_title="Forward Rate",
-                        template="plotly_white",
-                        height=400,
-                        hovermode='x unified',
-                        showlegend=True,
-                        legend=dict(
-                            yanchor="top",
-                            y=0.99,
-                            xanchor="left",
-                            x=0.01
-                        )
-                    )
-                else:
-                    fig.add_annotation(
-                        text=f"No forward rate data available for {currency} on selected dates",
-                        showarrow=False,
-                        x=0.5,
-                        y=0.5,
-                        xref="paper",
-                        yref="paper"
-                    )
-                    fig.update_layout(
-                        title=f"{currency} - Min/Max Forward Rate Comparison",
-                        template="plotly_white",
-                        height=400
-                    )
-            else:
-                fig.add_annotation(
-                    text=f"No forward deals available for {currency} on selected dates",
-                    showarrow=False,
-                    x=0.5,
-                    y=0.5,
-                    xref="paper",
-                    yref="paper"
-                )
-                fig.update_layout(
-                    title=f"{currency} - Min/Max Forward Rate Comparison",
-                    template="plotly_white",
-                    height=400
-                )
-            
-            return fig
-        
-        # Display the currency min/max chart
-        currency_chart = create_currency_minmax_chart(data_date1, data_date2, selected_currency, date1, date2)
-        st.plotly_chart(currency_chart, use_container_width=True)
-        
-        # Display currency forward rate statistics
-        forward_data_date1 = data_date1[data_date1['ValuationModel'].isin(forward_valuation_models)]
-        forward_data_date2 = data_date2[data_date2['ValuationModel'].isin(forward_valuation_models)]
-        currency_date1 = forward_data_date1[forward_data_date1['Currency'] == selected_currency]
-        currency_date2 = forward_data_date2[forward_data_date2['Currency'] == selected_currency]
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if not currency_date1.empty:
-                st.metric(
-                    f"{selected_currency} Forward Records ({date1.strftime('%b %d')})",
-                    len(currency_date1)
-                )
-            else:
-                st.metric(f"{selected_currency} Forward Records ({date1.strftime('%b %d')})", 0)
-        
-        with col2:
-            if not currency_date2.empty:
-                st.metric(
-                    f"{selected_currency} Forward Records ({date2.strftime('%b %d')})",
-                    len(currency_date2)
-                )
-            else:
-                st.metric(f"{selected_currency} Forward Records ({date2.strftime('%b %d')})", 0)
-        
-        with col3:
-            if not currency_date1.empty:
-                fwd_rates_date1 = currency_date1['FwdRate'].dropna()
-                if len(fwd_rates_date1) > 0:
-                    mean_rate_date1 = fwd_rates_date1.mean()
-                    st.metric(
-                        f"Mean Forward Rate ({date1.strftime('%b %d')})",
-                        f"{mean_rate_date1:.6f}"
-                    )
-                else:
-                    st.metric(f"Mean Forward Rate ({date1.strftime('%b %d')})", "N/A")
-            else:
-                st.metric(f"Mean Forward Rate ({date1.strftime('%b %d')})", "N/A")
-        
-        with col4:
-            if not currency_date2.empty:
-                fwd_rates_date2 = currency_date2['FwdRate'].dropna()
-                if len(fwd_rates_date2) > 0:
-                    mean_rate_date2 = fwd_rates_date2.mean()
-                    st.metric(
-                        f"Mean Forward Rate ({date2.strftime('%b %d')})",
-                        f"{mean_rate_date2:.6f}"
-                    )
-                else:
-                    st.metric(f"Mean Forward Rate ({date2.strftime('%b %d')})", "N/A")
-            else:
-                st.metric(f"Mean Forward Rate ({date2.strftime('%b %d')})", "N/A")
-    
-    else:
-        st.warning("No forward rate data available for the selected dates.")
-
-    st.markdown("---")
-
-    # Currency Spot Rate Min/Max Analysis Section
-    st.subheader("💰 Currency Spot Rate Min/Max Analysis")
-    
-    # Get available currencies from selected dates with spot valuation
-    spot_valuation_models = ['NPV SPOT']
-    spot_data_date1 = data_date1[data_date1['ValuationModel'].isin(spot_valuation_models)]
-    spot_data_date2 = data_date2[data_date2['ValuationModel'].isin(spot_valuation_models)]
-    available_spot_currencies = sorted(list(set(spot_data_date1['Currency'].unique()) | set(spot_data_date2['Currency'].unique())))
-    
-    if available_spot_currencies:
-        selected_spot_currency = st.selectbox(
-            "Select Currency for Spot Rate Min/Max Analysis:",
-            options=available_spot_currencies,
-            index=0,
-            help="Select a currency to view min/max spot rate analysis for the selected dates"
-        )
-        
-        # Create min/max analysis chart for selected currency
-        def create_spot_currency_minmax_chart(data_date1, data_date2, currency, date1, date2):
-            """Create min/max spot rate chart for selected currency"""
-            spot_valuation_models = ['NPV SPOT']
-            
-            # Filter for spot deals only
-            spot_data_date1 = data_date1[data_date1['ValuationModel'].isin(spot_valuation_models)]
-            spot_data_date2 = data_date2[data_date2['ValuationModel'].isin(spot_valuation_models)]
-            
-            currency_date1 = spot_data_date1[spot_data_date1['Currency'] == currency]
-            currency_date2 = spot_data_date2[spot_data_date2['Currency'] == currency]
-            
-            fig = go.Figure()
-            
-            if not currency_date1.empty and not currency_date2.empty:
-                # Calculate min and max spot rates for each date
-                spot_rates_date1 = currency_date1['SpotRate'].dropna()
-                spot_rates_date2 = currency_date2['SpotRate'].dropna()
-                
-                if len(spot_rates_date1) > 0 and len(spot_rates_date2) > 0:
-                    date1_min = spot_rates_date1.min()
-                    date1_max = spot_rates_date1.max()
-                    date1_mean = spot_rates_date1.mean()
-                    date2_min = spot_rates_date2.min()
-                    date2_max = spot_rates_date2.max()
-                    date2_mean = spot_rates_date2.mean()
-                    
-                    # Add min line
-                    fig.add_trace(go.Scatter(
-                        x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
-                        y=[date1_min, date2_min],
-                        mode='lines+markers',
-                        name='Minimum Spot Rate',
-                        line=dict(color='salmon', width=3, dash='dash'),
-                        marker=dict(size=8, color='salmon'),
-                        hovertemplate='<b>%{x}</b><br>Min Rate: %{y:.6f}<extra></extra>'
-                    ))
-                    
-                    # Add max line
-                    fig.add_trace(go.Scatter(
-                        x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
-                        y=[date1_max, date2_max],
-                        mode='lines+markers',
-                        name='Maximum Spot Rate',
-                        line=dict(color='skyblue', width=3, dash='dash'),
-                        marker=dict(size=8, color='skyblue'),
-                        hovertemplate='<b>%{x}</b><br>Max Rate: %{y:.6f}<extra></extra>'
-                    ))
-                    
-                    # Add mean line
-                    fig.add_trace(go.Scatter(
-                        x=[date1.strftime('%b %d, %Y'), date2.strftime('%b %d, %Y')],
-                        y=[date1_mean, date2_mean],
-                        mode='lines+markers',
-                        name='Mean Spot Rate',
-                        line=dict(color='darkorange', width=4),
-                        marker=dict(size=10, color='darkorange'),
-                        hovertemplate='<b>%{x}</b><br>Mean Rate: %{y:.6f}<extra></extra>'
-                    ))
-                    
-                    fig.update_layout(
-                        title=f"{currency} - Spot Rate Trends (Min/Max/Mean)",
-                        xaxis_title="Date",
-                        yaxis_title="Spot Rate",
-                        template="plotly_white",
-                        height=400,
-                        hovermode='x unified',
-                        showlegend=True,
-                        legend=dict(
-                            yanchor="top",
-                            y=0.99,
-                            xanchor="left",
-                            x=0.01
-                        )
-                    )
-                else:
-                    fig.add_annotation(
-                        text=f"No spot rate data available for {currency} on selected dates",
-                        showarrow=False,
-                        x=0.5,
-                        y=0.5,
-                        xref="paper",
-                        yref="paper"
-                    )
-                    fig.update_layout(
-                        title=f"{currency} - Min/Max Spot Rate Comparison",
-                        template="plotly_white",
-                        height=400
-                    )
-            else:
-                fig.add_annotation(
-                    text=f"No spot deals available for {currency} on selected dates",
-                    showarrow=False,
-                    x=0.5,
-                    y=0.5,
-                    xref="paper",
-                    yref="paper"
-                )
-                fig.update_layout(
-                    title=f"{currency} - Min/Max Spot Rate Comparison",
-                    template="plotly_white",
-                    height=400
-                )
-            
-            return fig
-        
-        # Display the currency min/max chart
-        spot_currency_chart = create_spot_currency_minmax_chart(data_date1, data_date2, selected_spot_currency, date1, date2)
-        st.plotly_chart(spot_currency_chart, use_container_width=True)
-        
-        # Display currency spot rate statistics
-        spot_data_date1 = data_date1[data_date1['ValuationModel'].isin(spot_valuation_models)]
-        spot_data_date2 = data_date2[data_date2['ValuationModel'].isin(spot_valuation_models)]
-        spot_currency_date1 = spot_data_date1[spot_data_date1['Currency'] == selected_spot_currency]
-        spot_currency_date2 = spot_data_date2[spot_data_date2['Currency'] == selected_spot_currency]
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if not spot_currency_date1.empty:
-                st.metric(
-                    f"{selected_spot_currency} Spot Records ({date1.strftime('%b %d')})",
-                    len(spot_currency_date1)
-                )
-            else:
-                st.metric(f"{selected_spot_currency} Spot Records ({date1.strftime('%b %d')})", 0)
-        
-        with col2:
-            if not spot_currency_date2.empty:
-                st.metric(
-                    f"{selected_spot_currency} Spot Records ({date2.strftime('%b %d')})",
-                    len(spot_currency_date2)
-                )
-            else:
-                st.metric(f"{selected_spot_currency} Spot Records ({date2.strftime('%b %d')})", 0)
-        
-        with col3:
-            if not spot_currency_date1.empty:
-                spot_rates_date1 = spot_currency_date1['SpotRate'].dropna()
-                if len(spot_rates_date1) > 0:
-                    mean_rate_date1 = spot_rates_date1.mean()
-                    st.metric(
-                        f"Mean Spot Rate ({date1.strftime('%b %d')})",
-                        f"{mean_rate_date1:.6f}"
-                    )
-                else:
-                    st.metric(f"Mean Spot Rate ({date1.strftime('%b %d')})", "N/A")
-            else:
-                st.metric(f"Mean Spot Rate ({date1.strftime('%b %d')})", "N/A")
-        
-        with col4:
-            if not spot_currency_date2.empty:
-                spot_rates_date2 = spot_currency_date2['SpotRate'].dropna()
-                if len(spot_rates_date2) > 0:
-                    mean_rate_date2 = spot_rates_date2.mean()
-                    st.metric(
-                        f"Mean Spot Rate ({date2.strftime('%b %d')})",
-                        f"{mean_rate_date2:.6f}"
-                    )
-                else:
-                    st.metric(f"Mean Spot Rate ({date2.strftime('%b %d')})", "N/A")
-            else:
-                st.metric(f"Mean Spot Rate ({date2.strftime('%b %d')})", "N/A")
-    
-    else:
-        st.warning("No spot rate data available for the selected dates.")
-
-    st.markdown("---")
 
     # Re-run analysis for selected dates
     def analyze_forex_data_for_dates(data, date1, date2):
@@ -1226,40 +1231,76 @@ def main():
     # Run analysis for selected dates
     results, data_date1, data_date2 = analyze_forex_data_for_dates(full_data, date1, date2)
 
+    # Currency Min/Max Analysis Section
+    st.markdown("---")
+    st.subheader("💱 Currency Forward Rate Min/Max Analysis")
+    
+    # Get available currencies from selected dates with forward valuation
+    forward_valuation_models = ['FORWARD', 'FORWARD NPV']
+    forward_data_date1 = data_date1[data_date1['ValuationModel'].isin(forward_valuation_models)]
+    forward_data_date2 = data_date2[data_date2['ValuationModel'].isin(forward_valuation_models)]
+    available_currencies = sorted(list(set(forward_data_date1['Currency'].unique()) | set(forward_data_date2['Currency'].unique())))
+    
+    if available_currencies:
+        selected_currency = st.selectbox(
+            "Select Currency for Forward Rate Min/Max Analysis:",
+            options=available_currencies,
+            index=0,
+            help="Select a currency to view min/max forward rate analysis for the selected dates"
+        )
+        
+        # Display the currency min/max chart
+        currency_chart = create_unified_currency_minmax_chart(data_date1, data_date2, selected_currency, date1, date2, 'forward')
+        st.plotly_chart(currency_chart, use_container_width=True, key="forward_rate_chart")
+        
+        # Display currency forward rate statistics
+        display_currency_rate_statistics(data_date1, data_date2, selected_currency, date1, date2, 'forward')
+    
+    else:
+        st.warning("No forward rate data available for the selected dates.")
+
+    st.markdown("---")
+
+    # Currency Spot Rate Min/Max Analysis Section
+    st.subheader("💰 Currency Spot Rate Min/Max Analysis")
+    
+    # Get available currencies from selected dates with spot valuation
+    spot_valuation_models = ['NPV SPOT']
+    spot_data_date1 = data_date1[data_date1['ValuationModel'].isin(spot_valuation_models)]
+    spot_data_date2 = data_date2[data_date2['ValuationModel'].isin(spot_valuation_models)]
+    available_spot_currencies = sorted(list(set(spot_data_date1['Currency'].unique()) | set(spot_data_date2['Currency'].unique())))
+    
+    if available_spot_currencies:
+        selected_spot_currency = st.selectbox(
+            "Select Currency for Spot Rate Min/Max Analysis:",
+            options=available_spot_currencies,
+            index=0,
+            help="Select a currency to view min/max spot rate analysis for the selected dates"
+        )
+        
+        # Display the currency min/max chart
+        spot_currency_chart = create_unified_currency_minmax_chart(data_date1, data_date2, selected_spot_currency, date1, date2, 'spot')
+        st.plotly_chart(spot_currency_chart, use_container_width=True, key="spot_rate_chart")
+        
+        # Display currency spot rate statistics
+        display_currency_rate_statistics(data_date1, data_date2, selected_spot_currency, date1, date2, 'spot')
+    
+    else:
+        st.warning("No spot rate data available for the selected dates.")
+
+    st.markdown("---")
+
     # --- All visualizations below use the selected dates/results ---
 
     # BaseMV comparison for analysis dates
     st.subheader(f"📊 Analysis for {date1.strftime('%b %d, %Y')} and {date2.strftime('%b %d, %Y')}")
     
     # Display deal counts for both dates
-    col_metrics1, col_metrics2, col_metrics3, col_metrics4 = st.columns(4)
+    display_analysis_summary_metrics(results, date1, date2)
     
-    with col_metrics1:
-        st.metric(
-            f"Total Deals ({date1.strftime('%b %d')})",
-            results['summary']['total_unique_deals_date1']
-        )
-    
-    with col_metrics2:
-        st.metric(
-            f"Total Deals ({date2.strftime('%b %d')})",
-            results['summary']['total_unique_deals_date2']
-        )
-    
-    with col_metrics3:
-        deals_change = results['summary']['total_unique_deals_date2'] - results['summary']['total_unique_deals_date1']
-        st.metric(
-            "Deal Count Change",
-            deals_change,
-            delta=deals_change
-        )
-    
-    with col_metrics4:
-        st.metric(
-            "Records Change",
-            results['summary']['total_records_date2'] - results['summary']['total_records_date1'],
-            delta=results['summary']['total_records_date2'] - results['summary']['total_records_date1']
-        )
+    # Key Financial Metrics for selected dates
+    st.subheader("📊 Key Financial Metrics")
+    display_key_financial_metrics(results, date1, date2)
     
     st.markdown("---")
     
@@ -1268,10 +1309,10 @@ def main():
     with col1:
         date1_str = date1.strftime('%b %d, %Y')
         date2_str = date2.strftime('%b %d, %Y')
-        st.plotly_chart(create_basemv_comparison_chart(results, date1_str, date2_str), use_container_width=True)
+        st.plotly_chart(create_basemv_comparison_chart(results, date1_str, date2_str), use_container_width=True, key="basemv_comparison")
 
     with col2:
-        st.plotly_chart(create_deals_breakdown_chart(results, date2.strftime('%b %d, %Y')), use_container_width=True)
+        st.plotly_chart(create_deals_breakdown_chart(results, date2.strftime('%b %d, %Y')), use_container_width=True, key="deals_breakdown")
 
     # Top deals analysis
     st.subheader("🔝 Top Deal Analysis")
@@ -1279,7 +1320,7 @@ def main():
     tab1, tab2, tab3 = st.tabs(["New Deals", "Existing Deals", "Matured Deals"])
 
     with tab1:
-        st.plotly_chart(create_top_deals_chart(results, 'new'), use_container_width=True)
+        st.plotly_chart(create_top_deals_chart(results, 'new'), use_container_width=True, key="top_new_deals")
 
         # Display top new deals table
         if results['new_deals_analysis']['top_3_deals_by_basemv']:
@@ -1289,7 +1330,7 @@ def main():
             st.dataframe(top_deals_df, use_container_width=True)
 
     with tab2:
-        st.plotly_chart(create_top_deals_chart(results, 'existing'), use_container_width=True)
+        st.plotly_chart(create_top_deals_chart(results, 'existing'), use_container_width=True, key="top_existing_deals")
 
         # Display top existing deals table
         if results['existing_deals_analysis']['top_3_deals_by_basemv_change']:
@@ -1299,7 +1340,7 @@ def main():
             st.dataframe(top_existing_df, use_container_width=True)
 
     with tab3:
-        st.plotly_chart(create_top_deals_chart(results, 'matured'), use_container_width=True)
+        st.plotly_chart(create_top_deals_chart(results, 'matured'), use_container_width=True, key="top_matured_deals")
 
         # Display top matured deals table
         if results['matured_deals_analysis']['top_3_deals_by_basemv']:
@@ -1340,7 +1381,14 @@ def main():
             with st.spinner("🧠 Analyzing data and generating business insights..."):
                 try:
                     st.info("📊 Calling OpenAI API function...")
-                    summary = call_chat_openai_api(results, api_key)
+                    # Prepare user context for API
+                    user_context = {}
+                    if user_type == "Entity":
+                        user_context['entity'] = selected_entity
+                    elif user_type == "Counterparty":
+                        user_context['counterparty'] = selected_counterparty
+                    
+                    summary = call_chat_openai_api(results, api_key, user_context)
                     st.info(f"📝 Received response length: {len(summary)} characters")
                     
                     # Display the summary in an attractive format
@@ -1363,37 +1411,12 @@ def main():
                     # Display the summary text in a nice info box
                     st.info(f"💡 **AI Analysis:** {summary}")
                     
-                    # Add key metrics alongside the summary
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric(
-                            "📈 BaseMV Change",
-                            f"${results['summary']['basemv_totals']['difference']:,.0f}",
-                            delta=f"{results['summary']['basemv_totals']['difference']:,.0f}"
-                        )
-                    
-                    with col2:
-                        st.metric(
-                            "🆕 New Deals Impact",
-                            f"${results['summary']['new_deals_basemv_sum']:,.0f}",
-                            delta=f"{results['summary']['new_deals_count']} deals"
-                        )
-                    
-                    with col3:
-                        st.metric(
-                            "🔄 Existing Deals Change",
-                            f"${results['summary']['existing_deals_basemv_change']:,.0f}",
-                            delta=f"{results['summary']['existing_deals_count']} deals"
-                        )
-                    
                 except Exception as e:
                     st.error(f"❌ Error generating business summary: {str(e)}")
                     st.error(f"🔍 Error type: {type(e).__name__}")
                     st.error(f"📋 Full error details: {repr(e)}")
                     
                     # Show traceback for debugging
-                    import traceback
                     st.code(traceback.format_exc())
                     
                     st.warning("💡 Make sure your OpenAI API key is configured in the environment variables.")
@@ -1421,11 +1444,16 @@ def main():
     
     with col1:
         if st.button("📄 Download Analysis Results (JSON)"):
+            # Create user-specific filename
+            user_suffix = ""
+            if user_type != "All Users":
+                user_suffix = f"_{user_type.lower()}_{selected_user}"
+            
             json_str = json.dumps(results, indent=2, default=str)
             st.download_button(
                 label="Download JSON",
                 data=json_str,
-                file_name=f"forex_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"forex_analysis{user_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json"
             )
     
@@ -1476,6 +1504,10 @@ def main():
                 file_name=f"forex_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain"
             )
+
+# =============================================================================
+# MAIN APPLICATION
+# =============================================================================
 
 if __name__ == "__main__":
     main()
