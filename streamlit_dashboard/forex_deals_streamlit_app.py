@@ -671,6 +671,172 @@ def display_key_financial_metrics(results, date1, date2):
         )
 
 # =============================================================================
+# NATURAL LANGUAGE QUERY FUNCTIONS
+# =============================================================================
+
+def process_natural_language_query(data, user_query, api_key, model="gpt-4", api_version="2023-05-15"):
+    """
+    Process natural language query to filter dataframe using LLM
+    """
+    # Get dataframe information for the LLM
+    df_info = {
+        "columns": list(data.columns),
+        "shape": data.shape,
+        "sample_data": data.head(3).to_dict(),
+        "unique_values": {
+            "Entity": list(data['Entity'].dropna().unique())[:10],
+            "Counterparty": list(data['Counterparty'].dropna().unique())[:10],
+            "Currency": list(data['Currency'].dropna().unique())[:10],
+            "ValuationModel": list(data['ValuationModel'].dropna().unique())[:10],
+        },
+        "date_range": {
+            "min_date": str(data['PositionDate'].min()),
+            "max_date": str(data['PositionDate'].max())
+        },
+        "basemv_stats": {
+            "min": float(data['BaseMV'].min()),
+            "max": float(data['BaseMV'].max()),
+            "mean": float(data['BaseMV'].mean()),
+            "quantiles": {
+                "25%": float(data['BaseMV'].quantile(0.25)),
+                "75%": float(data['BaseMV'].quantile(0.75))
+            }
+        }
+    }
+    
+    # Prepare the chat message payload for natural language query processing
+    messages = [
+        {
+            "role": "system",
+            "content": f"""
+            You are a data analyst assistant that helps convert natural language queries into pandas DataFrame filtering operations.
+            
+            Given a user's natural language query about forex trading data, generate appropriate pandas filtering code.
+            
+            DataFrame Information:
+            - Columns: {df_info['columns']}
+            - Shape: {df_info['shape']}
+            - Sample unique values: {df_info['unique_values']}
+            - Date range: {df_info['date_range']}
+            - BaseMV statistics: {df_info['basemv_stats']}
+            
+            IMPORTANT INSTRUCTIONS:
+            1. Generate ONLY executable pandas filtering code that returns a filtered dataframe
+            2. Use the variable name 'data' for the input dataframe
+            3. Return code that assigns the filtered result to 'filtered_data'
+            4. Handle date filtering using pd.to_datetime() if needed
+            5. Use case-insensitive string matching where appropriate (.str.contains(..., case=False, na=False))
+            6. For numerical comparisons, handle potential NaN values properly
+            7. For "high" values, use data['BaseMV'] > data['BaseMV'].quantile(0.75)
+            8. For "low" values, use data['BaseMV'] < data['BaseMV'].quantile(0.25)
+            9. For "positive" values, use data['BaseMV'] > 0
+            10. For "negative" values, use data['BaseMV'] < 0
+            11. If the query is unclear, return the original dataframe: filtered_data = data.copy()
+            
+            Common Query Patterns and Examples:
+            
+            **Currency Queries:**
+            - "Show me EUR deals" → filtered_data = data[data['Currency'] == 'EUR']
+            - "Find USD and JPY" → filtered_data = data[data['Currency'].isin(['USD', 'JPY'])]
+            - "All currency deals except USD" → filtered_data = data[data['Currency'] != 'USD']
+            
+            **Date Queries:**
+            - "March 2012" → filtered_data = data[data['PositionDate'].dt.strftime('%Y-%m') == '2012-03']
+            - "March 6, 2012" → filtered_data = data[data['PositionDate'].dt.date == pd.to_datetime('2012-03-06').date()]
+            - "After March 6" → filtered_data = data[data['PositionDate'] > pd.to_datetime('2012-03-06')]
+            
+            **Value Queries:**
+            - "High BaseMV" → filtered_data = data[data['BaseMV'] > data['BaseMV'].quantile(0.75)]
+            - "Low BaseMV" → filtered_data = data[data['BaseMV'] < data['BaseMV'].quantile(0.25)]
+            - "Positive values" → filtered_data = data[data['BaseMV'] > 0]
+            - "Negative values" → filtered_data = data[data['BaseMV'] < 0]
+            
+            **Valuation Model Queries:**
+            - "Forward deals" → filtered_data = data[data['ValuationModel'].str.contains('FORWARD', case=False, na=False)]
+            - "Spot deals" → filtered_data = data[data['ValuationModel'].str.contains('SPOT', case=False, na=False)]
+            - "NPV deals" → filtered_data = data[data['ValuationModel'].str.contains('NPV', case=False, na=False)]
+            
+            **Rate Queries:**
+            - "High forward rates" → filtered_data = data[data['FwdRate'] > data['FwdRate'].quantile(0.75)]
+            - "Low spot rates" → filtered_data = data[data['SpotRate'] < data['SpotRate'].quantile(0.25)]
+            
+            **Entity/Counterparty Queries:**
+            - "Entity ABC" → filtered_data = data[data['Entity'].str.contains('ABC', case=False, na=False)]
+            - "Counterparty XYZ" → filtered_data = data[data['Counterparty'].str.contains('XYZ', case=False, na=False)]
+            
+            Return ONLY the filtering code, no explanations.
+            """
+        },
+        {
+            "role": "user",
+            "content": f"User query: '{user_query}'\n\nGenerate pandas filtering code for this query."
+        }
+    ]
+
+    # Call the OpenAI Chat API
+    api_url = os.getenv("api_url")
+    
+    if api_url and api_key:
+        api_url = api_url.format(model=model, api_version=api_version)
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 300,
+            "temperature": 0.1  # Low temperature for consistent code generation
+        }
+        headers = {
+            "Authorization": api_key,
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache"
+        }
+        try:
+            response = requests.post(api_url, json=payload, headers=headers)
+            response.raise_for_status()
+            response = response.json()
+            
+            # Extract the generated code
+            generated_code = response['choices'][0]['message']['content'].strip()
+            
+            # Clean up the code (remove markdown formatting if present)
+            if generated_code.startswith("```python"):
+                generated_code = generated_code[9:]
+            if generated_code.startswith("```"):
+                generated_code = generated_code[3:]
+            if generated_code.endswith("```"):
+                generated_code = generated_code[:-3]
+            
+            generated_code = generated_code.strip()
+            
+            # Execute the generated code safely
+            try:
+                # Create a safe execution environment
+                exec_globals = {
+                    'data': data,
+                    'pd': pd,
+                    'np': np,
+                    'datetime': datetime
+                }
+                
+                # Execute the generated code
+                exec(generated_code, exec_globals)
+                
+                # Get the filtered data
+                filtered_data = exec_globals.get('filtered_data', data.copy())
+                
+                return filtered_data, generated_code, None
+                
+            except Exception as code_error:
+                return data.copy(), generated_code, f"Code execution error: {str(code_error)}"
+                
+        except requests.exceptions.HTTPError as err:
+            return data.copy(), "", f"HTTP error occurred: {err}"
+        except Exception as e:
+            return data.copy(), "", f"An error occurred while calling the OpenAI API: {e}"
+    else:
+        # Fallback: return original data if no API available
+        return data.copy(), "", "API not available - returning original data"
+
+# =============================================================================
 # API INTEGRATION FUNCTIONS
 # =============================================================================
 
@@ -932,9 +1098,118 @@ def main():
     if user_type != "All Users":
         st.caption(f"🎯 Filtered for: {user_type}: {selected_user}")
     
-    st.markdown("---")
+    # =============================================================================
+    # NATURAL LANGUAGE QUERY PROCESSING
+    # =============================================================================
     
-    # Sidebar
+    # Add natural language query interface
+    st.subheader("🤖 Natural Language Query")
+    st.markdown("Ask questions about your data in plain English and let AI filter the results for you!")
+    
+    # Create columns for query input and examples
+    col_query, col_examples = st.columns([2, 1])
+    
+    with col_query:
+        user_query = st.text_input(
+            "Enter your question:",
+            placeholder="e.g., Show me all EUR forward deals with high BaseMV values",
+            help="Ask questions about currencies, dates, deal types, entities, etc."
+        )
+        
+        # Query processing button
+        process_query = st.button("🔍 Process Query", type="primary")
+    
+    with col_examples:
+        with st.expander("💡 Example Queries"):
+            st.markdown("""
+            **Currency Queries:**
+            - Show me all EUR deals
+            - Find USD and JPY transactions
+            - All deals except USD
+            
+            **Date Queries:**
+            - Show deals from March 2012
+            - Find transactions on March 6, 2012
+            - Deals after March 6, 2012
+            
+            **Value Queries:**
+            - Show high BaseMV deals
+            - Find low BaseMV transactions
+            - Show positive value deals
+            - Find negative value transactions
+            
+            **Type Queries:**
+            - Show forward rate deals only
+            - Find NPV SPOT valuations
+            - Show all NPV deals
+            
+            **Rate Queries:**
+            - Find high forward rates
+            - Show low spot rates
+            
+            **Entity Queries:**
+            - Show deals for specific entities
+            - Find counterparty transactions
+            
+            **Complex Queries:**
+            - EUR forward deals with high BaseMV
+            - Negative USD transactions from March
+            - High value spot rate deals
+            """)
+    
+    # Process the natural language query if user has entered one
+    query_filtered_data = filtered_data.copy()
+    active_query = None
+    query_error = None
+    generated_code = ""
+    
+    if process_query and user_query.strip():
+        api_key = os.getenv("api_key")
+        
+        if api_key:
+            with st.spinner("🤖 Processing your query..."):
+                try:
+                    query_filtered_data, generated_code, query_error = process_natural_language_query(
+                        filtered_data, user_query, api_key
+                    )
+                    active_query = user_query
+                    
+                    # Show query results
+                    if query_error:
+                        st.error(f"❌ Query processing error: {query_error}")
+                        st.code(generated_code, language="python")
+                    else:
+                        st.success(f"✅ Query processed successfully! Found {len(query_filtered_data):,} records (from {len(filtered_data):,})")
+                        
+                        # Show the generated code in an expandable section
+                        with st.expander("🔧 Generated Filter Code"):
+                            st.code(generated_code, language="python")
+                            
+                except Exception as e:
+                    st.error(f"❌ Error processing query: {str(e)}")
+                    query_error = str(e)
+        else:
+            st.warning("⚠️ API key not configured. Using original filtered data.")
+    
+    # Update the filtered data to use query results
+    if active_query and not query_error:
+        filtered_data = query_filtered_data
+        
+        # Update the filtering information display
+        if user_type != "All Users":
+            st.success(f"🔍 **Combined Filters:** {user_type}: {selected_user} + Query: '{active_query}' | **Records:** {len(filtered_data):,}")
+        else:
+            st.success(f"🔍 **Natural Language Filter:** '{active_query}' | **Records:** {len(filtered_data):,}")
+    
+    # Update sidebar with query information
+    with st.sidebar:
+        if active_query and not query_error:
+            st.markdown("---")
+            st.markdown("### 🤖 Active Query")
+            st.markdown(f"**Query:** {active_query}")
+            st.markdown(f"**Results:** {len(filtered_data):,} records")
+    
+    st.markdown("---")
     
     # Display current filters in sidebar (updated after user selection)
     with st.sidebar:
