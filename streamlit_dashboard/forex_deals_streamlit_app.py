@@ -15,6 +15,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 from dotenv import load_dotenv
+
+# LangChain imports for Azure OpenAI
+try:
+    from langchain_openai import AzureChatOpenAI
+    from langchain.schema import HumanMessage, SystemMessage
+except ImportError:
+    print("LangChain not available. Install with: pip install langchain langchain-openai")
+
 load_dotenv()
 
 
@@ -674,35 +682,85 @@ def display_key_financial_metrics(results, date1, date2):
 # API INTEGRATION FUNCTIONS
 # =============================================================================
 
+def get_business_analysis_prompt():
+    """
+    Get the standardized business analysis prompt for AI models.
+    Returns the system prompt content for generating business-level summaries.
+    """
+    return """
+You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a well-formatted business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV).
+
+**FORMATTING REQUIREMENTS:**
+- Use clear headings with markdown formatting (##, ###)
+- Use bullet points (-) for lists and sub-points
+- Use **bold text** for key financial figures and important terms
+- Include line breaks between sections for better readability
+- Structure the response with clear sections
+
+**CONTENT REQUIREMENTS:**
+Focus on identifying whether the movement was primarily due to:
+1. Introduction of new deals
+2. Fluctuations in spot exchange rates  
+3. Changes in forward rates
+4. Matured deals that are no longer in the portfolio
+
+**RESPONSE STRUCTURE:**
+## Executive Summary
+Brief overview of the BaseMV change and primary drivers.
+
+## Key Drivers of BaseMV Change
+
+### 1. Matured Deals Impact
+- Total matured deals: [number]
+- BaseMV impact: $[amount]
+- Key details about significant matured deals
+
+### 2. New Deals Impact  
+- Total new deals: [number]
+- BaseMV contribution: $[amount]
+- Details about most significant new deals
+
+### 3. Existing Deals and Rate Fluctuations
+- Existing deals count: [number]
+- Net change: $[amount]
+- Currency rate movements (only mention currencies with significant changes)
+
+## Strategic Implications
+- Key insights and recommendations
+- Portfolio management considerations
+
+**Important Instructions:**
+- Do not include currencies if their rates remained stable
+- Provide specific financial figures with **bold formatting**
+- Use professional language suitable for executive reporting
+- Ensure proper spacing and formatting for readability
+
+Example of desired formatting:
+
+## Executive Summary
+Between [date1] and [date2], the BaseMV **increased by $X.X billion**, rising from **$X.X billion** to **$X.X billion**.
+
+## Key Drivers of BaseMV Change
+
+### 1. Matured Deals Impact
+- **86 deals matured**, releasing **$1.83 billion** in negative BaseMV burden
+- Top 3 matured deals contributed **$1.0 billion** in negative BaseMV relief
+- Primary currencies: **JPY, EUR**
+
+Now generate a similar well-formatted summary using the provided metadata.
+"""
+
 def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api_version="2023-05-15"):
     """
     Call the OpenAI Chat API with the analysis results as context.
     """
     print("Calling OpenAI API with model:", model)
     
-    # Prepare the chat message payload
+    # Prepare the chat message payload using the standardized prompt
     messages = [
         {
             "role": "system",
-            "content": f"""
-            You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV). Focus on identifying whether the movement was primarily due to:
-
-            Introduction of new deals
-            Fluctuations in spot exchange rates
-            Changes in forward rates
-            Important Instruction:
-            Do not include currencies in the summary if their spot or forward rates remained stable between the two dates.
-
-            Use the following examples as guidance for the style and depth of analysis expected:
-
-            Example 1 - BaseMV Dip Due to New Deals:
-            On March 7, the user's BaseMV declined by $500M. Analysis revealed that 45 new deals were added, contributing a net negative BaseMV of $620M. Spot and forward rates remained relatively stable, indicating that the dip was primarily driven by the new deal activity.
-
-            Example 2 - BaseMV Rise Due to Rate Fluctuations:
-            Between March 6 and March 7, the BaseMV increased by $800M. Although 53 new deals were added with a net negative impact of $560M, favorable movements in EUR and AUD forward rates, along with a rise in JPY spot rates, contributed positively to the portfolio valuation.
-
-            Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.
-            """
+            "content": get_business_analysis_prompt()
         },
         {
             "role": "user",
@@ -712,7 +770,7 @@ def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api
 
     # Call the OpenAI Chat API
     api_url = os.getenv("api_url")
-    
+    azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
     if api_url and api_key:
         api_url = api_url.format(model=model, api_version=api_version)
         payload = {
@@ -735,6 +793,10 @@ def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api
             raise Exception(f"HTTP error occurred: {err}")
         except Exception as e:
             raise Exception(f"An error occurred while calling the OpenAI API: {e}")
+    elif azure_api_key:
+        # Try Azure OpenAI if regular OpenAI doesn't work
+        print("Falling back to Azure OpenAI GPT-4...")
+        return call_azure_openai_gpt4(results, azure_api_key)
     else:
         # Fallback mock response for demo purposes
         return (
@@ -745,6 +807,57 @@ def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api
             f"Existing deals showed a change of ${results['summary']['existing_deals_basemv_change']:,.0f}. "
             "The overall movement reflects market dynamics and portfolio adjustments during this period."
         )
+
+def call_azure_openai_gpt4(results, api_key):
+    """
+    Call Azure OpenAI GPT-4 using LangChain with the analysis results as context.
+    
+    Args:
+        results (dict): Analysis results to send to GPT-4
+        api_key (str): Azure OpenAI API key
+    
+    Returns:
+        str: GPT-4 generated business summary
+    """
+    print("Calling Azure OpenAI GPT-4 using LangChain...")
+    
+    # Get Azure OpenAI configuration from environment
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+
+    
+    try:
+        # Initialize Azure OpenAI chat model using LangChain
+        llm = AzureChatOpenAI(
+            azure_endpoint=azure_endpoint,
+            azure_deployment=deployment_name,
+            api_version=api_version,
+            api_key=api_key,
+            temperature=0.7,
+            max_tokens=1000,
+            top_p=0.95,
+            frequency_penalty=0,
+            presence_penalty=0
+        )
+        
+        # Prepare the messages using the standardized prompt
+        system_message = SystemMessage(content=get_business_analysis_prompt())
+        human_message = HumanMessage(content=f"Here are the JSON analysis results:\n{json.dumps(results, indent=2, cls=NumpyEncoder)}")
+        
+        # Generate response using LangChain
+        print(f"Making LangChain request to Azure OpenAI deployment: {deployment_name}")
+        response = llm.invoke([system_message, human_message])
+        
+        print("Successfully received response from Azure OpenAI via LangChain")
+        return response.content
+        
+    except Exception as e:
+        print(f"LangChain Azure OpenAI Error: {e}")
+        print(f"Error type: {type(e).__name__}")
+        
+        # Re-raise the exception instead of providing a mock response
+        raise Exception(f"Azure OpenAI LangChain integration failed: {str(e)}")
 
 def calculate_daily_basemv_sum(data):
     """
@@ -762,6 +875,53 @@ def calculate_daily_basemv_sum(data):
     daily_basemv['BaseMV_Sum_Formatted'] = daily_basemv['BaseMV'].apply(lambda x: f"${x:,.0f}")
     
     return daily_basemv
+
+def find_highest_mv_difference_dates(daily_data, available_dates):
+    """
+    Find consecutive dates with highest market value difference
+    
+    Args:
+        daily_data (pd.DataFrame): DataFrame with PositionDate and BaseMV columns
+        available_dates (list): List of available dates to analyze
+    
+    Returns:
+        tuple: (best_date1, best_date2) - dates with highest market value difference
+    """
+    max_diff = 0
+    best_date1, best_date2 = None, None
+    
+    # Convert to daily data with dates as index for easier lookup
+    daily_lookup = daily_data.set_index('PositionDate')['BaseMV']
+    
+    # Check all consecutive date pairs
+    for i in range(len(available_dates) - 1):
+        date1 = available_dates[i]
+        date2 = available_dates[i + 1]
+        
+        try:
+            # Convert to pandas datetime for lookup
+            date1_pd = pd.to_datetime(date1)
+            date2_pd = pd.to_datetime(date2)
+            
+            if date1_pd in daily_lookup.index and date2_pd in daily_lookup.index:
+                mv1 = daily_lookup[date1_pd]
+                mv2 = daily_lookup[date2_pd]
+                diff = abs(mv2 - mv1)
+                
+                if diff > max_diff:
+                    max_diff = diff
+                    best_date1, best_date2 = date1, date2
+        except (KeyError, IndexError):
+            continue
+    
+    # Fallback to original logic if no good pair found
+    if best_date1 is None or best_date2 is None:
+        if datetime(2012, 3, 6).date() in available_dates and datetime(2012, 3, 7).date() in available_dates:
+            return datetime(2012, 3, 6).date(), datetime(2012, 3, 7).date()
+        else:
+            return available_dates[0], available_dates[1] if len(available_dates) > 1 else available_dates[0]
+    
+    return best_date1, best_date2
 
 def create_daily_basemv_line_chart(daily_basemv_data, selected_date1=None, selected_date2=None):
     """
@@ -1021,9 +1181,20 @@ def main():
     st.subheader("📊 Select Analysis Dates")
     available_dates = sorted(daily_basemv_detailed['PositionDate'].dt.date.unique())
     
-    # Default dates
-    default_date1 = datetime(2012, 3, 6).date() if datetime(2012, 3, 6).date() in available_dates else available_dates[0]
-    default_date2 = datetime(2012, 3, 7).date() if datetime(2012, 3, 7).date() in available_dates else (available_dates[1] if len(available_dates) > 1 else available_dates[0])
+    # Get default dates with highest market value difference
+    default_date1, default_date2 = find_highest_mv_difference_dates(daily_basemv_detailed, available_dates)
+    
+    # Display info about the selected default dates
+    if default_date1 != default_date2:
+        date1_pd = pd.to_datetime(default_date1)
+        date2_pd = pd.to_datetime(default_date2)
+        daily_lookup = daily_basemv_detailed.set_index('PositionDate')['BaseMV']
+        
+        if date1_pd in daily_lookup.index and date2_pd in daily_lookup.index:
+            mv1 = daily_lookup[date1_pd]
+            mv2 = daily_lookup[date2_pd]
+            diff = mv2 - mv1
+            st.info(f"🎯 **Auto-selected dates with highest market value change:** {default_date1.strftime('%b %d, %Y')} → {default_date2.strftime('%b %d, %Y')} (Change: ${diff:,.0f})")
     
     # Create two columns for the dropdowns
     col1, col2 = st.columns(2)
@@ -1374,25 +1545,40 @@ def main():
     generate_summary = st.button("🔮 Generate Business Insights", type="primary")
     
     if generate_summary:
+        # For openai api
         api_key = os.getenv("api_key")
         api_url = os.getenv("api_url")
         
+        # For Azure OpenAI client
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+        azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        
         # Debug information - this will show in the Streamlit UI
         with st.expander("🔧 Debug Information"):
-            st.write(f"**API Key:** `{repr(api_key)}`")
-            st.write(f"**API URL:** `{repr(api_url)}`")
-            st.write(f"**API Key is not None:** `{api_key is not None}`")
-            st.write(f"**Both API URL and Key truthy:** `{bool(api_url and api_key)}`")
-            if not bool(api_url and api_key):
-                st.info("🎭 Will use mock response since API credentials are empty")
+            st.write(f"**API Key is empty:** `{api_key == ''}`")
+            st.write(f"**API URL is empty:** `{api_url == ''}`")
+        
+            st.write(f"**Azure API Key is empty:** `{azure_api_key == ''}`")
+            st.write(f"**Azure Endpoint is empty:** `{azure_endpoint == ''}`")
+            st.write(f"**Azure Deployment is empty:** `{azure_deployment == ''}`")
+            st.write(f"**Azure API Version is empty:** `{api_version == ''}`")
+        
+            if bool(api_url and api_key):
+                st.success("✅ Will try OpenAI API first")
+            elif bool(azure_endpoint and azure_deployment):
+                st.info("🔄 Will fallback to Azure OpenAI GPT-4 via LangChain")
+            else:
+                st.warning("🎭 Will use mock response since no API credentials are available")
         
         if api_key is not None:
             with st.spinner("🧠 Analyzing data and generating business insights..."):
                 try:
-                    st.info("📊 Calling OpenAI API function...")
+                    st.info("📊 Generating AI business insights (OpenAI or Azure OpenAI)...")
                     
                     # Create directory for storing JSON results
-                    results_dir = "../analysis_results"
+                    results_dir = "./analysis_results"
                     os.makedirs(results_dir, exist_ok=True)
                     
                     # Create filename with timestamp and user context
@@ -1436,9 +1622,9 @@ def main():
                     # Display the summary in an attractive format
                     st.success("✅ Business insights generated successfully!")
                     
-                    
-                    # Display the summary text in a nice info box
-                    st.info(f"💡 **AI Analysis:** {summary}")
+                    # Display the summary text in a proper markdown format
+                    st.markdown("### 💡 AI Business Analysis")
+                    st.markdown(summary)
                     
                 except Exception as e:
                     st.error(f"❌ Error generating business summary: {str(e)}")
@@ -1448,10 +1634,25 @@ def main():
                     # Show traceback for debugging
                     st.code(traceback.format_exc())
                     
-                    st.warning("💡 Make sure your OpenAI API key is configured in the environment variables.")
+                    st.warning("💡 Make sure your API credentials (OpenAI or Azure OpenAI) are configured in the environment variables.")
         else:
-            st.warning("⚠️ OpenAI API key not found. Please configure the 'api_key' environment variable to generate AI insights.")
+            st.warning("⚠️ API key not found. Please configure the 'api_key' environment variable to generate AI insights.")
             st.info("💡 The AI summary provides business-level insights about BaseMV changes, rate fluctuations, and deal impacts.")
+            st.info("🔧 **Required environment variables:**")
+            st.code("""
+# For OpenAI:
+api_key=your_openai_api_key
+api_url=your_openai_api_url
+
+# For Azure OpenAI (LangChain fallback):
+api_key=your_azure_openai_api_key  
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT=gpt-4
+AZURE_OPENAI_API_VERSION=2024-08-01-preview
+
+# Additional requirement for Azure OpenAI:
+pip install langchain langchain-openai
+            """)
     
     # Raw data exploration
     with st.expander("🔍 Raw Data Exploration"):
