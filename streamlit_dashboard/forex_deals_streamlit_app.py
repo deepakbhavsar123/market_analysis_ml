@@ -682,35 +682,85 @@ def display_key_financial_metrics(results, date1, date2):
 # API INTEGRATION FUNCTIONS
 # =============================================================================
 
+def get_business_analysis_prompt():
+    """
+    Get the standardized business analysis prompt for AI models.
+    Returns the system prompt content for generating business-level summaries.
+    """
+    return """
+You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a well-formatted business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV).
+
+**FORMATTING REQUIREMENTS:**
+- Use clear headings with markdown formatting (##, ###)
+- Use bullet points (-) for lists and sub-points
+- Use **bold text** for key financial figures and important terms
+- Include line breaks between sections for better readability
+- Structure the response with clear sections
+
+**CONTENT REQUIREMENTS:**
+Focus on identifying whether the movement was primarily due to:
+1. Introduction of new deals
+2. Fluctuations in spot exchange rates  
+3. Changes in forward rates
+4. Matured deals that are no longer in the portfolio
+
+**RESPONSE STRUCTURE:**
+## Executive Summary
+Brief overview of the BaseMV change and primary drivers.
+
+## Key Drivers of BaseMV Change
+
+### 1. Matured Deals Impact
+- Total matured deals: [number]
+- BaseMV impact: $[amount]
+- Key details about significant matured deals
+
+### 2. New Deals Impact  
+- Total new deals: [number]
+- BaseMV contribution: $[amount]
+- Details about most significant new deals
+
+### 3. Existing Deals and Rate Fluctuations
+- Existing deals count: [number]
+- Net change: $[amount]
+- Currency rate movements (only mention currencies with significant changes)
+
+## Strategic Implications
+- Key insights and recommendations
+- Portfolio management considerations
+
+**Important Instructions:**
+- Do not include currencies if their rates remained stable
+- Provide specific financial figures with **bold formatting**
+- Use professional language suitable for executive reporting
+- Ensure proper spacing and formatting for readability
+
+Example of desired formatting:
+
+## Executive Summary
+Between [date1] and [date2], the BaseMV **increased by $X.X billion**, rising from **$X.X billion** to **$X.X billion**.
+
+## Key Drivers of BaseMV Change
+
+### 1. Matured Deals Impact
+- **86 deals matured**, releasing **$1.83 billion** in negative BaseMV burden
+- Top 3 matured deals contributed **$1.0 billion** in negative BaseMV relief
+- Primary currencies: **JPY, EUR**
+
+Now generate a similar well-formatted summary using the provided metadata.
+"""
+
 def call_chat_openai_api(results, api_key, user_context=None, model="gpt-4", api_version="2023-05-15"):
     """
     Call the OpenAI Chat API with the analysis results as context.
     """
     print("Calling OpenAI API with model:", model)
     
-    # Prepare the chat message payload
+    # Prepare the chat message payload using the standardized prompt
     messages = [
         {
             "role": "system",
-            "content": f"""
-            You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV). Focus on identifying whether the movement was primarily due to:
-
-            Introduction of new deals
-            Fluctuations in spot exchange rates
-            Changes in forward rates
-            Important Instruction:
-            Do not include currencies in the summary if their spot or forward rates remained stable between the two dates.
-
-            Use the following examples as guidance for the style and depth of analysis expected:
-
-            Example 1 - BaseMV Dip Due to New Deals:
-            On March 7, the user's BaseMV declined by $500M. Analysis revealed that 45 new deals were added, contributing a net negative BaseMV of $620M. Spot and forward rates remained relatively stable, indicating that the dip was primarily driven by the new deal activity.
-
-            Example 2 - BaseMV Rise Due to Rate Fluctuations:
-            Between March 6 and March 7, the BaseMV increased by $800M. Although 53 new deals were added with a net negative impact of $560M, favorable movements in EUR and AUD forward rates, along with a rise in JPY spot rates, contributed positively to the portfolio valuation.
-
-            Now, using the metadata provided, generate a similar business-level summary highlighting the financial impact and strategic implications of the BaseMV change.
-            """
+            "content": get_business_analysis_prompt()
         },
         {
             "role": "user",
@@ -791,70 +841,8 @@ def call_azure_openai_gpt4(results, api_key):
             presence_penalty=0
         )
         
-        # Prepare the messages
-        system_message = SystemMessage(content="""
-You are provided with metadata from a user's forex deal portfolio, comparing two reporting dates. Your task is to generate a well-formatted business-level summary that explains the key drivers behind the change in Base Market Value (BaseMV).
-
-**FORMATTING REQUIREMENTS:**
-- Use clear headings with markdown formatting (##, ###)
-- Use bullet points (-) for lists and sub-points
-- Use **bold text** for key financial figures and important terms
-- Include line breaks between sections for better readability
-- Structure the response with clear sections
-
-**CONTENT REQUIREMENTS:**
-Focus on identifying whether the movement was primarily due to:
-1. Introduction of new deals
-2. Fluctuations in spot exchange rates  
-3. Changes in forward rates
-4. Matured deals that are no longer in the portfolio
-
-**RESPONSE STRUCTURE:**
-## Executive Summary
-Brief overview of the BaseMV change and primary drivers.
-
-## Key Drivers of BaseMV Change
-
-### 1. Matured Deals Impact
-- Total matured deals: [number]
-- BaseMV impact: $[amount]
-- Key details about significant matured deals
-
-### 2. New Deals Impact  
-- Total new deals: [number]
-- BaseMV contribution: $[amount]
-- Details about most significant new deals
-
-### 3. Existing Deals and Rate Fluctuations
-- Existing deals count: [number]
-- Net change: $[amount]
-- Currency rate movements (only mention currencies with significant changes)
-
-## Strategic Implications
-- Key insights and recommendations
-- Portfolio management considerations
-
-**Important Instructions:**
-- Do not include currencies if their rates remained stable
-- Provide specific financial figures with **bold formatting**
-- Use professional language suitable for executive reporting
-- Ensure proper spacing and formatting for readability
-
-Example of desired formatting:
-
-## Executive Summary
-Between [date1] and [date2], the BaseMV **increased by $X.X billion**, rising from **$X.X billion** to **$X.X billion**.
-
-## Key Drivers of BaseMV Change
-
-### 1. Matured Deals Impact
-- **86 deals matured**, releasing **$1.83 billion** in negative BaseMV burden
-- Top 3 matured deals contributed **$1.0 billion** in negative BaseMV relief
-- Primary currencies: **JPY, EUR**
-
-Now generate a similar well-formatted summary using the provided metadata.
-""")
-        
+        # Prepare the messages using the standardized prompt
+        system_message = SystemMessage(content=get_business_analysis_prompt())
         human_message = HumanMessage(content=f"Here are the JSON analysis results:\n{json.dumps(results, indent=2, cls=NumpyEncoder)}")
         
         # Generate response using LangChain
